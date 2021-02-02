@@ -72,6 +72,7 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 			if body, err := c.GetRawData(); err != nil {
 				return fmt.Errorf("request read %w", err)
 			} else if err := json.Unmarshal(body, &data); err != nil {
+				log.Printf("request json decode %v", err)
 				request_body = bytes.NewReader(body)
 				// fall through
 			} else if tin, ok := cin.Run(data).Next(); !ok {
@@ -92,11 +93,14 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 			var res *http.Response
 
 			req.Header = c.Request.Header.Clone()
+			req.Header.Del("Accept-Encoding") // let the transport automatically set
+
 			if r, err := http.DefaultClient.Do(req); err != nil {
 				return fmt.Errorf("proxy request failed %w", err)
 			} else {
 				res = r
 			}
+
 			if cout == nil || res.ContentLength == 0 {
 				// fall through
 			} else {
@@ -104,9 +108,11 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 
 				var data interface{}
 				buf := bytes.NewBuffer(nil)
+
 				if _, err := io.Copy(buf, res.Body); err != nil {
 					return fmt.Errorf("proxy response read %w", err)
 				} else if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
+					log.Printf("response json decode %v", err)
 					res.Body = ioutil.NopCloser(bytes.NewReader(buf.Bytes()))
 					// fall through
 				} else if t, ok := cout.Run(data).Next(); !ok {
