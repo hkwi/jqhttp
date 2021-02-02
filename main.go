@@ -1,38 +1,40 @@
 package main
 
 import (
-	"flag"
-	"log"
-	"fmt"
-	"io"
-	"io/ioutil"
-	"encoding/json"
 	"bytes"
-	"strings"
-	"net/http"
-	"net/url"
-	"path"
+	"encoding/json"
+	"flag"
+	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/itchyny/gojq"
 	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
-	"github.com/itchyny/gojq"
+	"io"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"strings"
 )
 
 var k = koanf.New(".")
 
 func header_flatten(h http.Header) map[string]string {
 	ret := make(map[string]string)
-	for k,vs := range h {
-		ret[k] = strings.Join(vs,",")
+	for k, vs := range h {
+		ret[k] = strings.Join(vs, ",")
 	}
 	return ret
 }
 
 func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 	var cin, cout *gojq.Code
-	
+
 	if rt.Exists("request") {
 		if op, err := gojq.Parse(rt.String("request")); err != nil {
 			return err
@@ -51,16 +53,16 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 			cout = code
 		}
 	}
-	
+
 	var upstream *url.URL
-	if !rt.Exists("upstream"){
+	if !rt.Exists("upstream") {
 		return fmt.Errorf("upstream is missing")
 	} else if u, err := url.Parse(rt.String("upstream")); err != nil {
 		return err
 	} else {
 		upstream = u
 	}
-	
+
 	pipe := func(c *gin.Context) error {
 		var request_body io.Reader
 		if cin == nil || c.Request.ContentLength == 0 {
@@ -80,24 +82,26 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 				request_body = bytes.NewReader(qin)
 			}
 		}
-		
+
 		dst := *upstream
 		dst.Path = path.Join(dst.Path, c.Param("suffix"))
-		
+
 		if req, err := http.NewRequest(c.Request.Method, dst.String(), request_body); err != nil {
 			return fmt.Errorf("proxy build %w", err)
 		} else {
 			var res *http.Response
-			
+
 			req.Header = c.Request.Header.Clone()
 			if r, err := http.DefaultClient.Do(req); err != nil {
 				return fmt.Errorf("proxy request failed %w", err)
 			} else {
 				res = r
 			}
-			if cout != nil || res.ContentLength != 0 {
+			if cout == nil || res.ContentLength == 0 {
+				// fall through
+			} else {
 				defer res.Body.Close()
-				
+
 				var data interface{}
 				buf := bytes.NewBuffer(nil)
 				if _, err := io.Copy(buf, res.Body); err != nil {
@@ -130,12 +134,12 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 			return nil
 		}
 	}
-	
+
 	path := rt.String("path")
-	if ! strings.HasSuffix(path, "/") {
+	if !strings.HasSuffix(path, "/") {
 		path = path + "/"
 	}
-	en.Any(path+"*suffix", func(c *gin.Context){
+	en.Any(path+"*suffix", func(c *gin.Context) {
 		if err := pipe(c); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		}
@@ -143,7 +147,7 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 	return nil
 }
 
-func main(){
+func main() {
 	if err := k.Load(
 		confmap.Provider(map[string]interface{}{
 			"listen": ":8080",
@@ -151,15 +155,32 @@ func main(){
 	); err != nil {
 		log.Fatalf("%v", err)
 	}
+
 	if err := k.Load(
-		file.Provider(
-			*flag.String("c", "config.yml", "configuration yaml"),
-		),
+		env.Provider("JQHTTP_", ".", func(s string) string {
+			return strings.Replace(strings.ToLower(s), "_", ".", -1)
+		}),
+		nil,
+	); err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	yml_file := *flag.String("c", "config.yml", "configuration yaml")
+	if _, err := os.Stat(yml_file); os.IsNotExist(err) {
+		// pass
+	} else if err := k.Load(
+		file.Provider(yml_file),
 		yaml.Parser(),
 	); err != nil {
 		log.Fatalf("%v", err)
 	}
+
 	en := gin.Default()
+	if k.Exists("jqhttp") {
+		if err := register_route(en, k.Cut("jqhttp")); err != nil {
+			log.Fatal("%v", err)
+		}
+	}
 	for _, rt := range k.Slices("routes") {
 		if err := register_route(en, rt); err != nil {
 			log.Fatal("%v", err)
