@@ -85,8 +85,9 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 		}
 
 		dst := *upstream
-		dst.Path = path.Join(dst.Path, c.Param("suffix"))
-
+		if suffix, ok := c.Params.Get("suffix"); ok {
+			dst.Path = path.Join(dst.Path, suffix)
+		}
 		if req, err := http.NewRequest(c.Request.Method, dst.String(), request_body); err != nil {
 			return fmt.Errorf("proxy build %w", err)
 		} else {
@@ -142,10 +143,10 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 	}
 
 	path := rt.String("path")
-	if !strings.HasSuffix(path, "/") {
-		path = path + "/"
+	if strings.HasSuffix(path, "/") {
+		path = path + "*suffix"
 	}
-	en.Any(path+"*suffix", func(c *gin.Context) {
+	en.Any(path, func(c *gin.Context) {
 		if err := pipe(c); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		}
