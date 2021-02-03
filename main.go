@@ -154,6 +154,9 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 }
 
 func main() {
+	yml_file := flag.String("c", "config.yml", "configuration yaml")
+	flag.Parse()
+
 	if err := k.Load(
 		confmap.Provider(map[string]interface{}{
 			"listen": ":8080",
@@ -171,11 +174,10 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	yml_file := *flag.String("c", "config.yml", "configuration yaml")
-	if _, err := os.Stat(yml_file); os.IsNotExist(err) {
+	if _, err := os.Stat(*yml_file); os.IsNotExist(err) {
 		// pass
 	} else if err := k.Load(
-		file.Provider(yml_file),
+		file.Provider(*yml_file),
 		yaml.Parser(),
 	); err != nil {
 		log.Fatalf("%v", err)
