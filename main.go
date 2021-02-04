@@ -95,6 +95,9 @@ func register_route(en *gin.Engine, rt *koanf.Koanf) error {
 
 			req.Header = c.Request.Header.Clone()
 			req.Header.Del("Accept-Encoding") // let the transport automatically set
+			if rt.Exists("contenttype") {     // workaround for the server/clients that can't change Content-type
+				req.Header.Set("Content-Type", rt.String("contenttype"))
+			}
 
 			if r, err := http.DefaultClient.Do(req); err != nil {
 				return fmt.Errorf("proxy request failed %w", err)
