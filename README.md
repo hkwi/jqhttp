@@ -1,12 +1,14 @@
 # jqhttp
-http reverse proxy with jq transformation, both for request and response.
+http reverse proxy with jq transformation, both for request and response body.
 jqhttp is a kind of api-gateway.
 
-Following example shows github api response body json transformation.
+Following example shows [github api](https://docs.github.com/en/rest) response body json transformation.
 
 ```
 JQHTTP_RESPONSE=[.[].name] JQHTTP_UPSTREAM=https://api.github.com/orgs/apache/repos jqhttp
 ```
+
+Anothoer example is for [kafka rest proxy](https://docs.confluent.io/3.0.0/kafka-rest/docs/index.html) with request body transformation.
 
 ```
 JQHTTP_REQUEST='{"records":[{"value":.}]}' JQHTTP_UPSTREAM=http://rest-proxy:8082/topics/feed jqhttp
@@ -43,3 +45,6 @@ routes:
     response: |-
       [.[].name]
 ```
+
+# FYI
+tyk has [similar function](https://tyk.io/docs/advanced-configuration/transform-traffic/jq-transformations/).
