@@ -47,4 +47,5 @@ routes:
 ```
 
 # FYI
-tyk has [similar function](https://tyk.io/docs/advanced-configuration/transform-traffic/jq-transformations/).
+- tyk has [similar function](https://tyk.io/docs/advanced-configuration/transform-traffic/jq-transformations/).
+- kong has [jq plugin](https://docs.konghq.com/hub/kong-inc/jq/)
