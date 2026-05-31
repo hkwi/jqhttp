@@ -5,203 +5,258 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/itchyny/gojq"
-	"github.com/knadh/koanf"
-	"github.com/knadh/koanf/parsers/yaml"
-	"github.com/knadh/koanf/providers/confmap"
-	"github.com/knadh/koanf/providers/env"
-	"github.com/knadh/koanf/providers/file"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/itchyny/gojq"
+	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/v2"
 )
 
-var k = koanf.New(".")
+var config = koanf.New(".")
 
-func header_flatten(h http.Header) map[string]string {
-	ret := make(map[string]string)
-	for k, vs := range h {
-		ret[k] = strings.Join(vs, ",")
+func extraHeaders(header http.Header) map[string]string {
+	headers := make(map[string]string, len(header))
+	for key, values := range header {
+		switch http.CanonicalHeaderKey(key) {
+		case "Content-Length", "Content-Type":
+			continue
+		}
+		headers[key] = strings.Join(values, ",")
 	}
-	return ret
+	return headers
 }
 
-func register_route(en *gin.Engine, rt *koanf.Koanf) error {
-	var cin, cout *gojq.Code
-
-	if rt.Exists("request") {
-		if op, err := gojq.Parse(rt.String("request")); err != nil {
-			return err
-		} else if code, err := gojq.Compile(op); err != nil {
-			return err
-		} else {
-			cin = code
-		}
-	}
-	if rt.Exists("response") {
-		if op, err := gojq.Parse(rt.String("response")); err != nil {
-			return err
-		} else if code, err := gojq.Compile(op); err != nil {
-			return err
-		} else {
-			cout = code
-		}
+func compileFilter(routeConfig *koanf.Koanf, key string) (*gojq.Code, error) {
+	if !routeConfig.Exists(key) {
+		return nil, nil
 	}
 
-	var upstream *url.URL
-	if !rt.Exists("upstream") {
-		return fmt.Errorf("upstream is missing")
-	} else if u, err := url.Parse(rt.String("upstream")); err != nil {
+	query, err := gojq.Parse(routeConfig.String(key))
+	if err != nil {
+		return nil, fmt.Errorf("%s jq parse: %w", key, err)
+	}
+
+	code, err := gojq.Compile(query)
+	if err != nil {
+		return nil, fmt.Errorf("%s jq compile: %w", key, err)
+	}
+	return code, nil
+}
+
+func runFilter(code *gojq.Code, data any, label string) ([]byte, error) {
+	value, ok := code.Run(data).Next()
+	if !ok {
+		return nil, fmt.Errorf("%s jq produced no output", label)
+	}
+	if err, ok := value.(error); ok {
+		return nil, fmt.Errorf("%s jq run: %w", label, err)
+	}
+
+	body, err := gojq.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s jq serialize: %w", label, err)
+	}
+	return body, nil
+}
+
+func transformJSON(raw []byte, code *gojq.Code, label string) ([]byte, error) {
+	var data any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		log.Printf("%s json decode: %v", label, err)
+		return raw, nil
+	}
+	return runFilter(code, data, label)
+}
+
+func requestBody(c *gin.Context, filter *gojq.Code) (io.Reader, int64, error) {
+	if filter == nil || c.Request.ContentLength == 0 {
+		return c.Request.Body, c.Request.ContentLength, nil
+	}
+
+	raw, err := c.GetRawData()
+	if err != nil {
+		return nil, 0, fmt.Errorf("request read: %w", err)
+	}
+
+	body, err := transformJSON(raw, filter, "request")
+	if err != nil {
+		return nil, 0, err
+	}
+	return bytes.NewReader(body), int64(len(body)), nil
+}
+
+func responseBody(res *http.Response, filter *gojq.Code) (io.Reader, int64, error) {
+	if filter == nil || res.ContentLength == 0 {
+		return res.Body, res.ContentLength, nil
+	}
+
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("proxy response read: %w", err)
+	}
+
+	body, err := transformJSON(raw, filter, "response")
+	if err != nil {
+		return nil, 0, err
+	}
+	return bytes.NewReader(body), int64(len(body)), nil
+}
+
+func upstreamRequestURL(base *url.URL, suffix, rawQuery string) string {
+	dst := *base
+	if suffix != "" {
+		dst.Path = path.Join(dst.Path, suffix)
+	}
+	if rawQuery != "" {
+		if dst.RawQuery == "" {
+			dst.RawQuery = rawQuery
+		} else {
+			dst.RawQuery += "&" + rawQuery
+		}
+	}
+	return dst.String()
+}
+
+func envKey(name string) string {
+	return strings.ReplaceAll(strings.ToLower(name), "_", ".")
+}
+
+func registerRoute(engine *gin.Engine, routeConfig *koanf.Koanf) error {
+	requestFilter, err := compileFilter(routeConfig, "request")
+	if err != nil {
 		return err
-	} else {
-		upstream = u
+	}
+	responseFilter, err := compileFilter(routeConfig, "response")
+	if err != nil {
+		return err
 	}
 
-	pipe := func(c *gin.Context) error {
-		var request_body io.Reader
-		if cin == nil || c.Request.ContentLength == 0 {
-			request_body = c.Request.Body
-		} else {
-			var data interface{}
-			if body, err := c.GetRawData(); err != nil {
-				return fmt.Errorf("request read %w", err)
-			} else if err := json.Unmarshal(body, &data); err != nil {
-				log.Printf("request json decode %v", err)
-				request_body = bytes.NewReader(body)
-				// fall through
-			} else if tin, ok := cin.Run(data).Next(); !ok {
-				return fmt.Errorf("jq run failed")
-			} else if qin, err := gojq.Marshal(tin); err != nil {
-				return fmt.Errorf("jq serialize %w", err)
-			} else {
-				request_body = bytes.NewReader(qin)
-			}
-		}
-
-		dst := *upstream
-		if suffix, ok := c.Params.Get("suffix"); ok {
-			dst.Path = path.Join(dst.Path, suffix)
-		}
-		if req, err := http.NewRequest(c.Request.Method, dst.String(), request_body); err != nil {
-			return fmt.Errorf("proxy build %w", err)
-		} else {
-			var res *http.Response
-
-			req.Header = c.Request.Header.Clone()
-			req.Header.Del("Accept-Encoding") // let the transport automatically set
-			if rt.Exists("set.request.contenttype") {
-				// workaround for the server/clients that can't change Content-type
-				req.Header.Set("Content-Type", rt.String("set.request.contenttype"))
-			}
-
-			if r, err := http.DefaultClient.Do(req); err != nil {
-				return fmt.Errorf("proxy request failed %w", err)
-			} else {
-				res = r
-			}
-			if rt.Exists("set.response.contenttype") {
-				// workaround for the server/clients that can't change Content-type
-				res.Header.Set("Content-Type", rt.String("set.response.contenttype"))
-			}
-
-			if cout == nil || res.ContentLength == 0 {
-				// fall through
-			} else {
-				defer res.Body.Close()
-
-				var data interface{}
-				buf := bytes.NewBuffer(nil)
-
-				if _, err := io.Copy(buf, res.Body); err != nil {
-					return fmt.Errorf("proxy response read %w", err)
-				} else if err := json.Unmarshal(buf.Bytes(), &data); err != nil {
-					log.Printf("response json decode %v", err)
-					res.Body = ioutil.NopCloser(bytes.NewReader(buf.Bytes()))
-					// fall through
-				} else if t, ok := cout.Run(data).Next(); !ok {
-					return fmt.Errorf("jq response run failed")
-				} else if body, err := gojq.Marshal(t); err != nil {
-					return fmt.Errorf("jq serialize %w", err)
-				} else {
-					c.DataFromReader(
-						res.StatusCode,
-						int64(len(body)),
-						res.Header.Get("Content-Type"),
-						ioutil.NopCloser(bytes.NewReader(body)),
-						header_flatten(res.Header),
-					)
-					return nil
-				}
-			}
-			c.DataFromReader(
-				res.StatusCode,
-				res.ContentLength,
-				res.Header.Get("Content-Type"),
-				res.Body,
-				header_flatten(res.Header),
-			)
-			return nil
-		}
+	if !routeConfig.Exists("upstream") {
+		return fmt.Errorf("upstream is missing")
+	}
+	upstream, err := url.Parse(routeConfig.String("upstream"))
+	if err != nil {
+		return fmt.Errorf("upstream parse: %w", err)
+	}
+	if upstream.Scheme == "" || upstream.Host == "" {
+		return fmt.Errorf("upstream must be an absolute URL")
 	}
 
-	path := rt.String("path")
-	if strings.HasSuffix(path, "/") {
-		path = path + "*suffix"
+	routePath := routeConfig.String("path")
+	if routePath == "" {
+		routePath = "/"
 	}
-	en.Any(path, func(c *gin.Context) {
-		if err := pipe(c); err != nil {
+	if !strings.HasPrefix(routePath, "/") {
+		return fmt.Errorf("route path %q must start with /", routePath)
+	}
+	if strings.HasSuffix(routePath, "/") {
+		routePath += "*suffix"
+	}
+
+	engine.Any(routePath, func(c *gin.Context) {
+		if err := proxyRequest(c, routeConfig, upstream, requestFilter, responseFilter); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		}
 	})
 	return nil
 }
 
+func proxyRequest(c *gin.Context, routeConfig *koanf.Koanf, upstream *url.URL, requestFilter, responseFilter *gojq.Code) error {
+	body, contentLength, err := requestBody(c, requestFilter)
+	if err != nil {
+		return err
+	}
+
+	suffix, _ := c.Params.Get("suffix")
+	req, err := http.NewRequestWithContext(
+		c.Request.Context(),
+		c.Request.Method,
+		upstreamRequestURL(upstream, suffix, c.Request.URL.RawQuery),
+		body,
+	)
+	if err != nil {
+		return fmt.Errorf("proxy build: %w", err)
+	}
+	req.ContentLength = contentLength
+	req.Header = c.Request.Header.Clone()
+	req.Header.Del("Accept-Encoding")
+	if routeConfig.Exists("set.request.contenttype") {
+		req.Header.Set("Content-Type", routeConfig.String("set.request.contenttype"))
+	}
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("proxy request failed: %w", err)
+	}
+	defer res.Body.Close()
+
+	if routeConfig.Exists("set.response.contenttype") {
+		res.Header.Set("Content-Type", routeConfig.String("set.response.contenttype"))
+	}
+
+	responseReader, responseLength, err := responseBody(res, responseFilter)
+	if err != nil {
+		return err
+	}
+	c.DataFromReader(
+		res.StatusCode,
+		responseLength,
+		res.Header.Get("Content-Type"),
+		responseReader,
+		extraHeaders(res.Header),
+	)
+	return nil
+}
+
 func main() {
-	yml_file := flag.String("c", "config.yml", "configuration yaml")
+	configFile := flag.String("c", "config.yml", "configuration yaml")
 	flag.Parse()
 
-	if err := k.Load(
-		confmap.Provider(map[string]interface{}{
+	if err := config.Load(
+		confmap.Provider(map[string]any{
 			"listen": ":8080",
 		}, "."), nil,
 	); err != nil {
-		log.Fatalf("%v", err)
+		log.Fatal(err)
 	}
 
-	if err := k.Load(
-		env.Provider("JQHTTP_", ".", func(s string) string {
-			return strings.Replace(strings.ToLower(s), "_", ".", -1)
-		}),
+	if err := config.Load(
+		env.Provider("JQHTTP_", ".", envKey),
 		nil,
 	); err != nil {
-		log.Fatalf("%v", err)
+		log.Fatal(err)
 	}
 
-	if _, err := os.Stat(*yml_file); os.IsNotExist(err) {
-		// pass
-	} else if err := k.Load(
-		file.Provider(*yml_file),
-		yaml.Parser(),
-	); err != nil {
-		log.Fatalf("%v", err)
+	if _, err := os.Stat(*configFile); err == nil {
+		if err := config.Load(file.Provider(*configFile), yaml.Parser()); err != nil {
+			log.Fatal(err)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Fatal(err)
 	}
 
-	en := gin.Default()
-	if k.Exists("jqhttp") {
-		if err := register_route(en, k.Cut("jqhttp")); err != nil {
-			log.Fatal("%v", err)
+	engine := gin.Default()
+	if config.Exists("jqhttp") {
+		if err := registerRoute(engine, config.Cut("jqhttp")); err != nil {
+			log.Fatal(err)
 		}
 	}
-	for _, rt := range k.Slices("routes") {
-		if err := register_route(en, rt); err != nil {
-			log.Fatal("%v", err)
+	for _, routeConfig := range config.Slices("routes") {
+		if err := registerRoute(engine, routeConfig); err != nil {
+			log.Fatal(err)
 		}
 	}
-	en.Run(k.String("listen"))
+	if err := engine.Run(config.String("listen")); err != nil {
+		log.Fatal(err)
+	}
 }
