@@ -1,0 +1,4 @@
+/.cache/
+/jqhttp
+*.test
+coverage.out

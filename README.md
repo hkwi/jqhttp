@@ -8,7 +8,7 @@ Following example shows [github api](https://docs.github.com/en/rest) response b
 JQHTTP_RESPONSE=[.[].name] JQHTTP_UPSTREAM=https://api.github.com/orgs/apache/repos jqhttp
 ```
 
-Anothoer example is for [kafka rest proxy](https://docs.confluent.io/3.0.0/kafka-rest/docs/index.html) with request body transformation.
+Another example is for [kafka rest proxy](https://docs.confluent.io/3.0.0/kafka-rest/docs/index.html) with request body transformation.
 
 ```
 JQHTTP_REQUEST='{"records":[{"value":.}]}' JQHTTP_UPSTREAM=http://rest-proxy:8082/topics/feed jqhttp
@@ -20,7 +20,7 @@ JQHTTP_REQUEST='{"records":[{"value":.}]}' JQHTTP_UPSTREAM=http://rest-proxy:808
 Single jq filter proxy mapping can be configured by environment variables.
 
 - JQHTTP_UPSTREAM : proxy upstream server
-- JQHTTP_PATH : jqhttp mapping prefix. defaults to empty string "".
+- JQHTTP_PATH : jqhttp mapping prefix. defaults to "/".
 - JQHTTP_REQUEST : jq filter to apply to request body
 - JQHTTP_RESPONSE : jq filter to apply to response body
 
