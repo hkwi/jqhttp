@@ -1,6 +1,11 @@
 name: Publish Docker Image
 
 on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -19,10 +24,10 @@ jobs:
         shell: bash
         run: |
           image="hkwi/jqhttp"
-          tag="$(TZ=Asia/Tokyo date +%Y.%m.%d)"
+          sha="$(git rev-parse --short=12 HEAD)"
           {
             echo "image=${image}"
-            echo "date_tag=${tag}"
+            echo "sha_tag=${sha}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Login to Docker Hub
@@ -40,5 +45,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.date_tag }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha_tag }}
             ${{ steps.meta.outputs.image }}:latest
